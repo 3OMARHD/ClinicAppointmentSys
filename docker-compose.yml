@@ -1,0 +1,167 @@
+# ============================================
+# Clinic Appointment System — Docker Compose
+# Run: docker compose up --build
+# ============================================
+
+services:
+
+  # ---- PostgreSQL Database ----
+  postgres:
+    image: postgres:15-alpine
+    container_name: clinic-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - clinic-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ---- RabbitMQ Message Queue ----
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: clinic-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS}
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    networks:
+      - clinic-network
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+  # ---- Auth Service ----
+  auth-service:
+    build: ./auth-service
+    container_name: clinic-auth
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      JWT_EXPIRY_HOURS: ${JWT_EXPIRY_HOURS}
+      RABBITMQ_URL: ${RABBITMQ_URL}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+      LOGGING_SERVICE_URL: ${LOGGING_SERVICE_URL}
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - clinic-network
+    restart: unless-stopped
+
+  # ---- Appointment Service (Business Service 1) ----
+  bussiness-service-1:
+    build: ./bussiness-service-1
+    container_name: clinic-appointments
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      RABBITMQ_URL: ${RABBITMQ_URL}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+      LOGGING_SERVICE_URL: ${LOGGING_SERVICE_URL}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+    volumes:
+      - uploads_data:/app/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - clinic-network
+    restart: unless-stopped
+
+  # ---- Notification Service (Business Service 2) ----
+  business-service-2:
+    build: ./business-service-2
+    container_name: clinic-notifications
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - clinic-network
+    restart: unless-stopped
+
+  # ---- Worker Service ----
+  worker-service:
+    build: ./worker-service
+    container_name: clinic-worker
+    environment:
+      RABBITMQ_URL: ${RABBITMQ_URL}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+      NOTIFICATION_SERVICE_URL: ${NOTIFICATION_SERVICE_URL}
+      LOGGING_SERVICE_URL: ${LOGGING_SERVICE_URL}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      business-service-2:
+        condition: service_started
+      logging-service:
+        condition: service_started
+    networks:
+      - clinic-network
+    restart: unless-stopped
+
+  # ---- Logging / Audit Service ----
+  logging-service:
+    build: ./logging-service
+    container_name: clinic-logging
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - clinic-network
+    restart: unless-stopped
+
+  # ---- Nginx API Gateway ----
+  nginx:
+    build: ./nginx
+    container_name: clinic-gateway
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - auth-service
+      - bussiness-service-1
+      - business-service-2
+      - logging-service
+    networks:
+      - clinic-network
+    restart: unless-stopped
+
+# ---- Networks ----
+networks:
+  clinic-network:
+    driver: bridge
+
+# ---- Volumes ----
+volumes:
+  postgres_data:
+  uploads_data:
